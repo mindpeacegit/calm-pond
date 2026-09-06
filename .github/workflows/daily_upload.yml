@@ -1,0 +1,57 @@
+name: Daily Multi-Channel Shorts Upload
+
+on:
+  schedule:
+    - cron: "0 22 * * *"  # 매일 UTC 22:00 = 한국시간 07:00
+  workflow_dispatch: {}
+
+jobs:
+  discover-channels:
+    runs-on: ubuntu-latest
+    outputs:
+      channels: ${{ steps.list.outputs.channels }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          CHANNELS=$(ls channels/*.json 2>/dev/null | xargs -n1 basename | sed 's/\.json$//' | jq -R -s -c 'split("\n")[:-1]')
+          if [ "$CHANNELS" = "[]" ]; then
+            echo "channels/ 폴더에 채널 설정 파일이 없습니다." >&2
+          fi
+          echo "channels=$CHANNELS" >> "$GITHUB_OUTPUT"
+
+  run-channel:
+    needs: discover-channels
+    if: needs.discover-channels.outputs.channels != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON(needs.discover-channels.outputs.channels) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 시스템 패키지 설치
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - name: 파이썬 패키지 설치
+        run: pip install -r requirements.txt
+      - name: 채널별 인증 파일 복원
+        env:
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: python scripts/restore_credentials.py "${{ matrix.channel }}"
+      - name: 파이프라인 실행
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          YOUTUBE_PRIVACY_STATUS: ${{ secrets.YOUTUBE_PRIVACY_STATUS }}
+        run: python main.py --channel "${{ matrix.channel }}"
+      - name: used_topics 커밋
+        run: |
+          git config user.name "shorts-bot"
+          git config user.email "shorts-bot@users.noreply.github.com"
+          git add "data/${{ matrix.channel }}/used_topics.json"
+          git commit -m "chore: update ${{ matrix.channel }} used topics" || echo "변경사항 없음"
+          git pull --rebase
+          git push
